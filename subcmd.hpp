@@ -86,24 +86,85 @@ extern void add_alias(Alias alias, Loc loc = Loc::current());
 extern void add_aliases(std::initializer_list<Alias> aliases, Loc loc = Loc::current());
 
 /**
- * @brief Parse a command using args vector
+ * @brief Resolves alias to final command name
+ * @param alias The alias to be resolved
+ * @return Final command name
+*/
+extern std::string_view resolve_alias(std::string_view alias);
+
+/**
+ * @brief Command Not Found callback signature used at parse()
+*/
+template <typename F>
+concept CmdNotFoundCallback = std::invocable<F, std::optional<std::string_view>>;
+
+/**
+ * @brief Command Failed callback signature used at parse()
+*/
+template <typename F>
+concept CmdFailedCallback = std::invocable<F, std::string_view>;
+
+/**
+ * @brief Parse and run a command
+ * @param program_name Program's name (argv[0])
  * @param argc Args vector's count
  * @param argv Args vector
  * @p argv and @p argc should NOT include program name
- * @return Pointer to handler function (nullptr if command doesn't exists)
-   and name of the command passed through argv
+ * @param on_cmd_not_found Callback if command isn't found
+ * @param on_cmd_not_failed Callback if command has failed during execution
+ * See CmdNotFoundCallback and CmdFailedCallback concepts
+ * Return type doesn't matter, function doesn't check its return value.
+ * @return True if command ran successfully and found false otherwise
 */
-extern std::pair<handler_fn, std::string_view> parse(int argc, char **argv);
+template <CmdNotFoundCallback FF1, CmdFailedCallback FF2>
+inline bool parse(const char *program_name, int argc, char **argv, FF1 on_cmd_not_found, FF2 on_cmd_failed)
+{
+  const char *name_cstr = shift(argc, argv);
+  if (!name_cstr) { on_cmd_not_found(std::nullopt); return false; }
+  std::string_view name = name_cstr;
+  std::string_view target = resolve_alias(name);
+
+  // Find command with resolved name
+  if (auto it = cmds.find(target); it != cmds.end()) {
+    if (it->second.handler) {
+      if (!it->second.handler(program_name, argc, argv)) {
+        on_cmd_failed(name); return false;
+      }
+      return true;
+    }
+  }
+
+  on_cmd_not_found(name); return false;
+}
+
+/**
+ * @brief Overload for parse() without command failed callback
+*/
+template <CmdNotFoundCallback FF>
+inline bool parse(const char *program_name, int argc, char **argv, FF on_cmd_not_found)
+{ return parse(program_name, argc, argv, on_cmd_not_found, [](auto){}); }
+
+/**
+ * @brief Overload for parse() without command failed and not found callback
+*/
+inline bool parse(const char *program_name, int argc, char **argv)
+{ return parse(program_name, argc, argv, [](auto){}, [](auto){}); }
+
+/**
+ * @brief Check if command or alias exists
+ * @param cmd_name Command or alias' name
+ * @return true if it exists on aliases or cmds false otherwise
+*/
+bool exists(std::string_view cmd_name);
 
 /**
  * @brief Print whole program's commands and aliases
- * @param program_name Program's name, argv[0]
  * @param indent Indentation level to be used at printing
  * @param f Stream to print (stdout by default)
  * It'll print commands like this:
  * <indentation><command_name> [ | <...aliases seperated by '|'> ]<usage>: <description>
 */
-void print_commands(const char *program_name, int indent = 4, std::FILE *f = stdout);
+void print_commands(int indent = 4, std::FILE *f = stdout);
 
 /**
  * @brief Print a command or alias
@@ -123,7 +184,7 @@ extern void print_command(std::string_view cmd_name, const char *program_name, i
 
 #define _SUBCMD_SV_ARG(sv) (int)(sv).size(), (sv).data()
 
-static std::string_view resolve_alias(std::string_view alias)
+std::string_view resolve_alias(std::string_view alias)
 {
   if (auto it = als.find(alias); it != als.end()) {
     return it->second.to;
@@ -196,19 +257,9 @@ void add_aliases(std::initializer_list<Alias> aliases, std::source_location loc)
   for (Alias a : aliases) add_alias(a, loc);
 }
 
-std::pair<handler_fn, std::string_view> parse(int argc, char **argv)
+bool exists(std::string_view cmd_name)
 {
-  const char *name_cstr = shift(argc, argv);
-  if (!name_cstr) return {nullptr, "<no command>"};
-  std::string_view name = name_cstr;
-  std::string_view target = resolve_alias(name);
-
-  // Find command with resolved name
-  // but return command name with its original value (unresolved)
-  if (auto it = cmds.find(target); it != cmds.end()) {
-    return {it->second.handler, name};
-  }
-  return {nullptr, name};
+  return cmds.contains(resolve_alias(cmd_name));
 }
 
 void print_command(std::string_view cmd_name, const char *program_name, int indent, std::FILE *f)
@@ -237,10 +288,23 @@ void print_command(std::string_view cmd_name, const char *program_name, int inde
   std::fputc('\n', f);
 }
 
-void print_commands(const char *program_name, int indent, std::FILE *f)
+void print_commands(int indent, std::FILE *f)
 {
-  (void)program_name; (void)indent; (void)f;
-  assert(false && "TODO: print_commands");
+  // <indentation><command_name> [ | <...aliases seperated by '|'> ]<usage>: <description>
+
+  for (const auto &[_, cmd] : cmds) {
+    for (int i = 0; i < indent; i++) std::fputc(' ', f);
+    std::fprintf(f, "%.*s", _SUBCMD_SV_ARG(cmd.name));
+
+    for (const auto &[_, al] : als) {
+      if (al.to == cmd.name) {
+        fprintf(f, " | %.*s", _SUBCMD_SV_ARG(al.alias));
+      }
+    }
+
+    if (cmd.usage.size() > 0) std::fputc(' ', f);
+    std::fprintf(f, "%.*s: %.*s\n", _SUBCMD_SV_ARG(cmd.usage), _SUBCMD_SV_ARG(cmd.desc));
+  }
 }
 
 #endif // SUBCMD_IMPL
